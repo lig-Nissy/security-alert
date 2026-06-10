@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { BackLink } from "@/components/back_link";
 import { InputForm } from "@/features/package_scanner/components/input_form";
 import { ScanReport } from "@/features/package_scanner/components/scan_report";
 import type { ScanReport as ScanReportType } from "@/features/package_scanner/types/vulnerability";
@@ -51,6 +52,8 @@ export function ScannerPage() {
 
     return (
         <main className="max-w-3xl mx-auto px-6 py-10 space-y-8">
+            <BackLink />
+
             <header className="space-y-2">
                 <h1 className="text-2xl font-bold">パッケージ脆弱性スキャナ</h1>
                 <p className="text-sm opacity-80 leading-relaxed">

@@ -12,8 +12,8 @@ export default function Home() {
                         サプライチェーン脆弱性をその場で診断
                     </h1>
                     <p className="max-w-xl text-base leading-7 text-zinc-600 dark:text-zinc-400">
-                        外部スクリプト（polyfill.io 型攻撃）と npm
-                        パッケージ（既知CVE・侵害履歴）の両面から、貼り付けたコードを解析します。
+                        外部スクリプトと
+                        npmパッケージ（既知CVE・侵害履歴）の両面から、貼り付けたコードを解析します。
                     </p>
                 </div>
                 <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
