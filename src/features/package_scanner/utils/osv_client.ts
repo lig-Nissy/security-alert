@@ -26,26 +26,115 @@ type OsvVulnDetail = {
     database_specific?: { severity?: string };
 };
 
-function parseCvssBase(score: string): number | null {
-    const match = score.match(/CVSS:[\d.]+\/([A-Z0-9:/.-]+)/);
-    if (!match) return null;
-    const parts = match[1].split("/");
-    for (const part of parts) {
-        if (part.startsWith("S:")) continue;
+const CVSS3_AV: Record<string, number> = { N: 0.85, A: 0.62, L: 0.55, P: 0.2 };
+const CVSS3_AC: Record<string, number> = { L: 0.77, H: 0.44 };
+const CVSS3_UI: Record<string, number> = { N: 0.85, R: 0.62 };
+const CVSS3_CIA: Record<string, number> = { H: 0.56, L: 0.22, N: 0 };
+// PR depends on Scope (Unchanged/Changed). Index by scope first, then PR.
+const CVSS3_PR: Record<string, Record<string, number>> = {
+    U: { N: 0.85, L: 0.62, H: 0.27 },
+    C: { N: 0.85, L: 0.68, H: 0.5 },
+};
+
+function roundUp1(value: number): number {
+    // CVSS v3.x "roundUp1": round up to 1 decimal place. Uses integer math to avoid FP drift.
+    const scaled = Math.round(value * 100000);
+    if (scaled % 10000 === 0) return scaled / 100000;
+    return (Math.floor(scaled / 10000) + 1) / 10;
+}
+
+function parseVectorMetrics(vector: string): Record<string, string> | null {
+    const trimmed = vector.trim();
+    const slash = trimmed.indexOf("/");
+    if (slash < 0) return null;
+    const head = trimmed.slice(0, slash);
+    if (!/^CVSS:\d+(?:\.\d+)?$/.test(head)) return null;
+    const out: Record<string, string> = { __version: head.slice("CVSS:".length) };
+    for (const segment of trimmed.slice(slash + 1).split("/")) {
+        const colon = segment.indexOf(":");
+        if (colon <= 0) continue;
+        const key = segment.slice(0, colon);
+        const value = segment.slice(colon + 1);
+        if (key && value) out[key] = value;
     }
-    const baseMatch = score.match(/\bbase[Ss]core[:=]([\d.]+)\b/);
-    if (baseMatch) return Number.parseFloat(baseMatch[1]);
+    return out;
+}
+
+function computeCvss3Base(vector: string): number | null {
+    const metrics = parseVectorMetrics(vector);
+    if (!metrics) return null;
+    if (!metrics.__version.startsWith("3")) return null;
+
+    const av = CVSS3_AV[metrics.AV];
+    const ac = CVSS3_AC[metrics.AC];
+    const ui = CVSS3_UI[metrics.UI];
+    const scope = metrics.S;
+    const prTable = CVSS3_PR[scope];
+    const pr = prTable ? prTable[metrics.PR] : undefined;
+    const c = CVSS3_CIA[metrics.C];
+    const i = CVSS3_CIA[metrics.I];
+    const a = CVSS3_CIA[metrics.A];
+    if (
+        av === undefined ||
+        ac === undefined ||
+        ui === undefined ||
+        pr === undefined ||
+        c === undefined ||
+        i === undefined ||
+        a === undefined
+    ) {
+        return null;
+    }
+
+    const iss = 1 - (1 - c) * (1 - i) * (1 - a);
+    const impact = scope === "U" ? 6.42 * iss : 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15;
+    const exploitability = 8.22 * av * ac * pr * ui;
+    if (impact <= 0) return 0;
+    const raw = scope === "U" ? impact + exploitability : 1.08 * (impact + exploitability);
+    return roundUp1(Math.min(raw, 10));
+}
+
+function computeCvss4Base(vector: string): number | null {
+    // Full CVSS v4 base score requires lookup tables. Fall back to a coarse
+    // mapping using the four severity macro-vectors when available.
+    const metrics = parseVectorMetrics(vector);
+    if (!metrics) return null;
+    if (!metrics.__version.startsWith("4")) return null;
+    // Conservative: rely on the explicit AT/AC/UI/VC/VI/VA fields. If any required
+    // base metric is missing, give up rather than guess.
+    const required = ["AV", "AC", "AT", "PR", "UI", "VC", "VI", "VA", "SC", "SI", "SA"];
+    if (required.some((k) => !metrics[k])) return null;
+    // Highest impact present (Vulnerable + Subsequent) is a reasonable upper bound
+    // for severity bucketing when we can't do the full computation.
+    const impactWeights: Record<string, number> = { H: 3, L: 2, N: 0 };
+    const impacts = ["VC", "VI", "VA", "SC", "SI", "SA"].map((k) => impactWeights[metrics[k]] ?? 0);
+    const maxImpact = Math.max(...impacts);
+    if (maxImpact === 0) return 0;
+    const avWeight: Record<string, number> = { N: 3, A: 2, L: 1, P: 0 };
+    const exploit = (avWeight[metrics.AV] ?? 0) + (metrics.UI === "N" ? 1 : 0);
+    // Map to a 0-10 bucket. This is intentionally coarse and used only as a fallback.
+    const approx = maxImpact * 2 + exploit;
+    return Math.min(approx, 10);
+}
+
+function computeCvssBaseScore(vector: string): number | null {
+    if (vector.startsWith("CVSS:3")) return computeCvss3Base(vector);
+    if (vector.startsWith("CVSS:4")) return computeCvss4Base(vector);
     return null;
 }
 
-function severityFromCvss(score: string): Severity {
-    const v = parseCvssBase(score);
-    if (v === null) return "unknown";
-    if (v >= 9) return "critical";
-    if (v >= 7) return "high";
-    if (v >= 4) return "medium";
-    if (v > 0) return "low";
+function severityFromBaseScore(score: number): Severity {
+    if (score >= 9) return "critical";
+    if (score >= 7) return "high";
+    if (score >= 4) return "medium";
+    if (score > 0) return "low";
     return "unknown";
+}
+
+function severityFromCvss(vector: string): Severity {
+    const score = computeCvssBaseScore(vector);
+    if (score === null) return "unknown";
+    return severityFromBaseScore(score);
 }
 
 function severityFromLabel(label: string): Severity {
